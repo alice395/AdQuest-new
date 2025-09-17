@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AdQuest</title>
-    
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lucide@latest"></script>
@@ -631,7 +631,8 @@
                     currencyIcon: '৳',
                     referralPercentage: 0.10, 
                     telegramChannelUrl: "https://t.me/AdQuestbd",
-                    adConfig: { network: 'monetag', type: 'interstitial', code: '' }  // Set 'code' to your Monetag zone ID in Firestore!
+                    adConfig: { network: 'monetag', code: '' },  // Set 'code' to your Monetag zone ID in Firestore!
+                    inAppSettings: { frequency: 1, capping: 100, interval: 0, timeout: 5, everyPage: false }  // Adjusted for faster loading
                 };
             };
 
@@ -765,6 +766,7 @@
             };
             
             const claimReward = async (taskType) => {
+                console.log('claimReward called for', taskType);
                 if (!currentUser || !userData) return;
                 const userRef = doc(db, "users", currentUser.uid);
                 const claimBtn = document.querySelector(`.${taskType}-btn`);
@@ -786,7 +788,13 @@
                 }
                 
                 if (!appConfig.adConfig || !appConfig.adConfig.network || !appConfig.adConfig.code) {
+                    console.log('Ad config incomplete');
                     return showToast("Ad service is not configured. Please contact support.");
+                }
+
+                if (!window.Telegram || !window.Telegram.WebApp) {
+                    console.log('Not in Telegram Mini App');
+                    return showToast("This app must be opened in Telegram to view ads.");
                 }
                 
                 toggleButtonLoading(claimBtn, true);
@@ -820,6 +828,7 @@
                 };
 
                 try {
+                    console.log('Trying to show ad for', taskType);
                     switch (appConfig.adConfig.network) {
                         case 'monetag':
                             const adCode = appConfig.adConfig.code;
@@ -829,18 +838,24 @@
                                 throw new Error('SDK function not available');
                             }
                             const monetagAdFunction = window[adFunctionName];
-                            const adType = appConfig.adConfig.type;
-                            if (adType === 'interstitial' || taskType === 'inApp') {
-                                await monetagAdFunction();
-                                await rewardFunction();
-                                await updateUI();
-                            } else if (adType === 'popup' || taskType === 'popup') {
-                                await monetagAdFunction('pop');
-                                await rewardFunction();
-                                await updateUI();
-                            } else {
-                                throw new Error(`Unsupported ad type: ${adType}`);
+                            let adOptions = {};
+                            switch (taskType) {
+                                case 'interstitial':
+                                    adOptions.type = 'end';
+                                    break;
+                                case 'popup':
+                                    adOptions.type = 'pop';
+                                    break;
+                                case 'inApp':
+                                    adOptions.type = 'inApp';
+                                    adOptions.inAppSettings = appConfig.inAppSettings || { frequency: 1, capping: 100, interval: 0, timeout: 5, everyPage: false };
+                                    break;
+                                default:
+                                    throw new Error(`Unsupported task type: ${taskType}`);
                             }
+                            await monetagAdFunction(adOptions);
+                            await rewardFunction();
+                            await updateUI();
                             break;
                         default:
                             throw new Error("Ad network not supported or configured.");
@@ -880,7 +895,7 @@
             const loadWithdrawalHistory = async () => {
                 const historyList = document.getElementById('withdrawal-history-list');
                 historyList.innerHTML = '<p class="text-gray-500 text-center py-4">Loading history...</p>';
-                const q = query(collection(db, "withdrawals"), where("userId", "==", currentUser.uid), orderBy("requestedAt", "desc"));
+                const q = query(collection(db, "withdrawals"), where("userId", "==", currentUser.uid));
                 
                 try {
                     const querySnapshot = await getDocs(q);
@@ -888,14 +903,18 @@
                         historyList.innerHTML = '<p class="text-gray-500 text-center py-8">You haven\'t made any withdrawals yet.</p>';
                         return;
                     }
-                    historyList.innerHTML = '';
+                    let requests = [];
                     querySnapshot.forEach(docSnap => {
-                        const request = docSnap.data();
+                        requests.push(docSnap.data());
+                    });
+                    requests.sort((a, b) => b.requestedAt.seconds - a.requestedAt.seconds);
+                    historyList.innerHTML = '';
+                    requests.forEach(request => {
                         const status = request.status || 'pending';
                         let statusColor = 'text-yellow-400';
                         if (status === 'approved') statusColor = 'text-green-400';
                         else if (status === 'rejected') statusColor = 'text-red-400';
-                        const date = request.requestedAt ? request.requestedAt.toDate().toLocaleDateString() : 'N/A';
+                        const date = request.requestedAt ? new Date(request.requestedAt.seconds * 1000).toLocaleDateString() : 'N/A';
                         historyList.innerHTML += `<div class="card-bg p-4 rounded-xl flex items-center justify-between"><div><p class="font-semibold text-sm">${request.amount} Coins - ${request.method}</p><p class="text-xs text-gray-500">${date}</p></div><p class="font-bold ${statusColor} text-sm capitalize">${status}</p></div>`;
                     });
                 } catch (error) {
@@ -983,6 +1002,11 @@
                 document.getElementById('join-tg-btn').addEventListener('click', app.joinTgChannel);
                 ui.withdrawMethodSelect.addEventListener('change', updateDynamicPaymentFields);
                 
+                // Ad claim buttons
+                document.querySelector('.interstitial-btn').addEventListener('click', () => app.claimReward('interstitial'));
+                document.querySelector('.popup-btn').addEventListener('click', () => app.claimReward('popup'));
+                document.querySelector('.inApp-btn').addEventListener('click', () => app.claimReward('inApp'));
+                
                 document.querySelectorAll('.nav-link').forEach(link => {
                     link.addEventListener('click', (e) => {
                         e.preventDefault();
@@ -994,6 +1018,12 @@
             };
 
             const init = () => {
+                if (window.Telegram && window.Telegram.WebApp) {
+                    Telegram.WebApp.ready();
+                    Telegram.WebApp.expand();
+                } else {
+                    console.warn('Not running in Telegram Mini App environment. Some features like ads may not work.');
+                }
                 lucide.createIcons();
                 setupEventListeners();
                 ui.authSection.style.display = 'flex';
@@ -1016,4 +1046,4 @@
 
     </script>
 </body>
-                            </html>
+</html>
